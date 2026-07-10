@@ -1,5 +1,4 @@
 import json
-import uuid
 import base64
 import ssl
 import urllib.request
@@ -12,8 +11,10 @@ import datetime
 import tempfile
 import platform
 import subprocess
+import traceback
 from src.api.auth import get_token
 from src.api.http_client import build_opener
+from src.api.rating import call_rating, summarize_rates
 from src.config import (
     UPS_CLIENT_ID,
     UPS_CLIENT_SECRET,
@@ -51,82 +52,6 @@ PACKAGING_TYPES = {
     "30": "Pallet (팔레트)"
 }
 
-def _get_money(node: dict, *keys):
-    cur = node
-    for k in keys:
-        if isinstance(cur, dict) and k in cur: cur = cur[k]
-        else: return None, None
-    if isinstance(cur, dict):
-        mv = cur.get("MonetaryValue") or cur.get("TotalCharge", {}).get("MonetaryValue")
-        cc = cur.get("CurrencyCode") or cur.get("TotalCharge", {}).get("CurrencyCode")
-        return mv, cc
-    return None, None
-
-def summarize_rates(data: dict):
-    rated = []
-    if isinstance(data, dict):
-        if "RateResponse" in data: rated = data["RateResponse"].get("RatedShipment") or []
-        elif "RatedShipment" in data: rated = data.get("RatedShipment") or []
-    if isinstance(rated, dict): rated = [rated]
-    out = []
-    for it in rated:
-        if not isinstance(it, dict): continue
-        svc = it.get("Service") or {}
-        code = (svc.get("Code") if isinstance(svc, dict) else None) or it.get("serviceCode")
-        desc = (svc.get("Description") if isinstance(svc, dict) else None) or it.get("serviceName")
-
-        list_total_mv, list_cc = _get_money(it, "TotalCharges")
-        neg_total_mv, neg_cc = None, None
-        for key in ["NegotiatedRateCharges", "NegotiatedRates", "TotalShipmentCharge"]:
-            mv, cc = _get_money(it, key)
-            if mv and cc: neg_total_mv, neg_cc = mv, cc; break
-
-        def to_f(x):
-            try: return float(x)
-            except Exception: return None
-
-        list_total = to_f(list_total_mv)
-        neg_total = to_f(neg_total_mv) if neg_total_mv is not None else None
-
-        if not desc and code and code in SERVICE_CODE_MAP:
-            desc = SERVICE_CODE_MAP.get(code)
-        
-        billing_weight = None
-        try: billing_weight = float(it.get("BillingWeight", {}).get("Weight"))
-        except: billing_weight = None
-
-        out.append({
-            "service_code": code or "",
-            "service_desc": (desc or ""),
-            "currency": neg_cc or list_cc,
-            "list_total": list_total,
-            "negotiated_total": neg_total,
-            "billing_weight": billing_weight
-        })
-    out.sort(key=lambda x: (x["negotiated_total"] if x["negotiated_total"] is not None else (x["list_total"] or 0)))
-    return out
-
-def call_rating(base_url: str, access_token: str, shipment: dict):
-    url = f"{base_url}/api/rating/v2403/Shop"
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "transId": uuid.uuid4().hex[:32],
-        "transactionSrc": "tk-gui"
-    }
-    payload = {
-        "RateRequest": {
-            "Request": {
-                "TransactionReference": {"CustomerContext": "tk-rate"},
-                "RequestOption": "Shop"
-            },
-            "Shipment": shipment
-        }
-    }
-    code, body = http_post(url, headers, payload, form=False)
-    if code >= 400: raise RuntimeError(f"Rating failed: {code} {body}")
-    return json.loads(body)
 
 # ---------------- GUI ----------------
 root = tk.Tk()
@@ -586,7 +511,7 @@ def on_get_rates():
             csv_path = os.path.join(log_dir, f"rates_{ts}.csv")
             save_results_as_csv(default_path=csv_path)
 
-        rows = summarize_rates(raw)
+        rows = summarize_rates(raw,service_code_map=SERVICE_CODE_MAP,)
         rows = [r for r in rows if r.get("service_code") in allowed]
 
         for i in rate_tree.get_children(): rate_tree.delete(i)
@@ -605,6 +530,7 @@ def on_get_rates():
 
         status.set(f"[{mode}] 조회 성공. {len(rows)}개 운임 필터링 완료.")
     except Exception as e:
+        traceback.print_exc()
         messagebox.showerror("조회 실패", str(e))
         status.set("오류 발생으로 조회가 중단되었습니다.")
     finally:
