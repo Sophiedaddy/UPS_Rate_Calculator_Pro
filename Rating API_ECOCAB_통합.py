@@ -7,13 +7,17 @@ import urllib.parse
 import urllib.error
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
-import os, datetime, tempfile, platform, subprocess
+import os
+import datetime
+import tempfile
+import platform
+import subprocess
 
-# ====== UPS credentials & defaults ======
-UPS_CLIENT_ID = "qaMuNs08sWcrw4gBlcIyWyP4Yz7xkElOfwmq1jqbGdgJTj1l"
-UPS_CLIENT_SECRET = "3sHr54qUdS35cgwWGx8K4DwUGd2JBNP5fQe0RJ1yS9eqMOtFobqJhJlfyBGID9m3"
-UPS_SHIPPER_NUMBER_DEFAULT = "751Y6Y"
-# ========================================
+from src.config import (
+    UPS_CLIENT_ID,
+    UPS_CLIENT_SECRET,
+    UPS_SHIPPER_NUMBER,
+)
 
 SERVICE_CODE_MAP = {
     "01": "UPS Next Day Air",
@@ -258,7 +262,7 @@ ttk.Radiobutton(cred, text="Production (운영)", variable=env_var, value="PROD"
 ttk.Radiobutton(cred, text="Test (CIE 환경)", variable=env_var, value="TEST").grid(row=0, column=2, padx=6)
 
 ttk.Label(cred, text="청구 계정번호").grid(row=1, column=0, sticky="w", padx=5, pady=5)
-shipper_var = tk.StringVar(value="751Y6Y")
+shipper_var = tk.StringVar(value=UPS_SHIPPER_NUMBER)
 ttk.Entry(cred, textvariable=shipper_var, width=20, state="readonly").grid(row=1, column=1, sticky="w", padx=(6,12))
 
 ttk.Label(cred, text="회사명").grid(row=1, column=2, sticky="w", padx=5, pady=5)
@@ -397,21 +401,45 @@ def _get_log_base_dir():
     os.makedirs(tmp, exist_ok=True)
     return tmp
 
-def _open_folder(path):
-    if platform.system() == "Windows": os.startfile(path)
-    elif platform.system() == "Darwin": subprocess.Popen(["open", path])
-    else: subprocess.Popen(["xdg-open", path])
-
 def _mask_sensitive(obj):
     try:
         data = json.loads(json.dumps(obj))
-        try:
-            if "BillShipper" in data["RateRequest"]["Shipment"]["PaymentDetails"]["ShipmentCharge"][0]:
-                acc = data["RateRequest"]["Shipment"]["PaymentDetails"]["ShipmentCharge"][0]["BillShipper"]["AccountNumber"]
-                data["RateRequest"]["Shipment"]["PaymentDetails"]["ShipmentCharge"][0]["BillShipper"]["AccountNumber"] = acc[:2] + "***" + acc[-1:]
-        except Exception: pass
+
+        charge = (
+            data.get("RateRequest", {})
+            .get("Shipment", {})
+            .get("PaymentDetails", {})
+            .get("ShipmentCharge", [{}])[0]
+        )
+
+        for billing_key in (
+            "BillShipper",
+            "BillReceiver",
+            "BillThirdParty",
+        ):
+            billing = charge.get(billing_key)
+
+            if not isinstance(billing, dict):
+                continue
+
+            account = str(billing.get("AccountNumber", ""))
+
+            if account:
+                if len(account) >= 3:
+                    masked = (
+                        account[:2]
+                        + "*" * max(len(account) - 3, 1)
+                        + account[-1:]
+                    )
+                else:
+                    masked = "***"
+
+                billing["AccountNumber"] = masked
+
         return data
-    except Exception: return obj
+
+    except Exception:
+        return obj
 
 def save_results_as_csv(default_path=None):
     try:
@@ -528,7 +556,7 @@ def on_get_rates():
             shipment = {
                 "Shipper": {
                     "Name": "ECO CAB",
-                    "ShipperNumber": "751Y6Y",
+                    "ShipperNumber": UPS_SHIPPER_NUMBER,
                     "Address": kr_address
                 },
                 "ShipFrom": {
@@ -543,7 +571,7 @@ def on_get_rates():
                     "ShipmentCharge": [
                         {
                             "Type": "01",
-                            "BillShipper": {"AccountNumber": "751Y6Y"}
+                            "BillShipper": {"AccountNumber": UPS_SHIPPER_NUMBER}
                         }
                     ]
                 }
@@ -569,7 +597,7 @@ def on_get_rates():
                         {
                             "Type": "01", 
                             "BillReceiver": { # 💡 제3자 정산이 아닌 수화인(한국 수입자) 직권 청구 맵핑
-                                "AccountNumber": "751Y6Y",
+                                "AccountNumber": UPS_SHIPPER_NUMBER,
                                 "Address": {
                                     "CountryCode": "KR",
                                     "PostalCode": "44936"
