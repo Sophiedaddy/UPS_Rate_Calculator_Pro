@@ -12,7 +12,8 @@ import datetime
 import tempfile
 import platform
 import subprocess
-
+from src.api.auth import get_token
+from src.api.http_client import build_opener
 from src.config import (
     UPS_CLIENT_ID,
     UPS_CLIENT_SECRET,
@@ -49,67 +50,6 @@ PACKAGING_TYPES = {
     "02": "일반 상자 (Customer Supplied Package)",
     "30": "Pallet (팔레트)"
 }
-
-def _build_ssl_context():
-    cafile = os.environ.get("UPS_CA_BUNDLE")
-    insecure = os.environ.get("UPS_INSECURE") == "1"
-    if insecure:
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        return ctx
-    if cafile and os.path.exists(cafile):
-        return ssl.create_default_context(cafile=cafile)
-    return ssl.create_default_context()
-
-def _build_opener():
-    proxy = urllib.request.ProxyHandler()
-    https_handler = urllib.request.HTTPSHandler(context=_build_ssl_context())
-    opener = urllib.request.build_opener(proxy, https_handler)
-    return opener
-
-def _friendly_net_error(e):
-    import socket
-    if isinstance(e, urllib.error.HTTPError):
-        try: body = e.read().decode("utf-8", "ignore")[:400]
-        except Exception: body = ""
-        return f"HTTP {e.code} 오류 (URL: {e.geturl()})\n응답: {body}"
-    if isinstance(e, urllib.error.URLError):
-        r = e.reason
-        if isinstance(r, ssl.SSLError): return "SSL 인증서 검증 실패. IT에 문의하세요."
-        if isinstance(r, socket.gaierror): return "DNS 해석 실패. 네트워크 설정을 확인하세요."
-        return f"네트워크 연결 실패: {r}"
-    return str(e)
-
-def http_post(url: str, headers: dict, data_dict: dict, form: bool = False):
-    data = urllib.parse.urlencode(data_dict).encode("utf-8") if form else json.dumps(data_dict).encode("utf-8")
-    req = urllib.request.Request(url, data=data, method="POST")
-    for k, v in headers.items(): req.add_header(k, v)
-    opener = _build_opener()
-    for attempt in range(3):
-        try:
-            with opener.open(req, timeout=30) as resp:
-                return resp.getcode(), resp.read().decode("utf-8", "ignore")
-        except Exception as e:
-            if attempt < 2:
-                import time
-                time.sleep(1.5 * (attempt + 1))
-            else:
-                raise RuntimeError(f"urlopen error: {_friendly_net_error(e)}")
-
-def get_token(base_url: str) -> str:
-    url = f"{base_url}/security/v1/oauth/token"
-    basic = base64.b64encode(f"{UPS_CLIENT_ID}:{UPS_CLIENT_SECRET}".encode("utf-8")).decode("utf-8")
-    headers = {
-        "Authorization": f"Basic {basic}",
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Accept": "application/json"
-    }
-    code, body = http_post(url, headers, {"grant_type": "client_credentials"}, form=True)
-    if code != 200: raise RuntimeError(f"OAuth failed: {code} {body}")
-    tok = json.loads(body).get("access_token")
-    if not tok: raise RuntimeError(f"No access_token in response: {body}")
-    return tok
 
 def _get_money(node: dict, *keys):
     cur = node
@@ -237,7 +177,7 @@ def resolve_zip_city_state():
         cc = to_country_var.get().strip().upper()
         z = to_zip_var.get().strip()
         if cc != "US" or not z or len(z) < 5: return
-        opener = _build_opener()
+        opener = build_opener()
         with opener.open(f"https://api.zippopotam.us/us/{z}", timeout=8) as resp:
             if resp.getcode() != 200: return
             data = json.loads(resp.read().decode("utf-8", "ignore"))
